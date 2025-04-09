@@ -1,166 +1,158 @@
-const express = require("express");
-const { MongoClient, ObjectId } = require("mongodb");
-const path = require("path");
-const fs = require("fs");
-
+const express = require('express');
+const { MongoClient, ObjectId } = require('mongodb');
+const path = require('path');
 const app = express();
-const PORT = 3000;
-const MONGO_URI =
-  "mongodb+srv://moizuser1:moiz123@cluster0.xwoau.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
-const DB_NAME = "afterschool";
 
 app.use(express.json());
 
-// Manual CORS
+app.set('port', process.env.PORT || 3000);
+
+// CORS headers
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS,POST,PUT");
+  res.setHeader("Access-Control-Allow-Headers", "Origin,Accept, X-Requested-With, Content-Type, Access-Control-Request-Method, Access-Control-Request-Headers");
   next();
 });
 
-// Logger Middleware
-app.use((req, res, next) => {
-  console.log(
-    `[${new Date().toLocaleString()}] ${req.method} ${req.originalUrl}`
-  );
-  next();
-});
+let db;
+const mongoUri = "mongodb+srv://Risith:2006vodka@cluster0.anfwr.mongodb.net/";
 
-// Validator Middleware for PUT
-function validateLessonUpdate(req, res, next) {
-  const { subject, location, price, spaces } = req.body;
-  if (
-    (subject && typeof subject !== "string") ||
-    (location && typeof location !== "string") ||
-    (price && typeof price !== "number") ||
-    (spaces && typeof spaces !== "number")
-  ) {
-    return res.status(400).send("Invalid lesson data format");
+async function connectDB() {
+  try {
+    const client = await MongoClient.connect(mongoUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true
+    });
+    db = client.db('afterschool');
+    console.log("Connected to MongoDB successfully");
+
+    app.listen(app.get('port'), () => {
+      console.log(`Server running at http://localhost:${app.get('port')}`);
+    });
+  } catch (err) {
+    console.error("Database connection error:", err);
+    process.exit(1);
   }
-  next();
 }
 
-// Serve images
-app.use("/images", (req, res) => {
-  const imgPath = path.join(__dirname, "images", req.url);
-  fs.stat(imgPath, (err, stat) => {
-    if (err || !stat.isFile()) return res.status(404).send("Image not found");
-    res.sendFile(imgPath);
-  });
+connectDB();
+
+// Dynamically set the collection based on the collectionName parameter.
+app.param('collectionName', (req, res, next, collectionName) => {
+  if (!db) {
+    console.error("Database not connected yet!");
+    return res.status(500).json({ error: "Database connection not established yet" });
+  }
+  req.collection = db.collection(collectionName);
+  next();
 });
 
-// MongoDB Setup
-let db, lessons, orders;
-MongoClient.connect(MONGO_URI, { useUnifiedTopology: true })
-  .then((client) => {
-    db = client.db(DB_NAME);
-    lessons = db.collection("lessons");
-    orders = db.collection("orders");
-    console.log("✅ Connected to MongoDB");
-  })
-  .catch((err) => console.error("❌ MongoDB Error:", err));
-
-// GET all lessons
-app.get("/lessons", async (req, res) => {
-  try {
-    const data = await lessons.find({}).toArray();
-    res.json(data);
-  } catch (err) {
-    res.status(500).send("Error fetching lessons");
-  }
-});
-
-// GET filtered lessons (search)
-app.get("/search", async (req, res) => {
-  const q = req.query.q?.trim().toLowerCase() || "";
-  try {
-    const result = await lessons
-      .find({
-        $or: [
-          { subject: { $regex: q, $options: "i" } },
-          { location: { $regex: q, $options: "i" } },
-        ],
-      })
-      .toArray();
-    res.json(result);
-  } catch {
-    res.status(500).send("Error during search");
-  }
-});
-
-// GET all orders
-app.get("/orders", async (req, res) => {
-  try {
-    const data = await orders.find({}).toArray();
-    res.json(data);
-  } catch (err) {
-    console.error("Error fetching orders:", err);
-    res.status(500).send("Error fetching orders");
-  }
-});
-
-// PUT lesson update
-app.put("/lessons/:id", validateLessonUpdate, async (req, res) => {
-  const { id } = req.params;
-  try {
-    const result = await lessons.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: req.body }
-    );
-    if (result.matchedCount === 0)
-      return res.status(404).send("Lesson not found");
-    res.send("✅ Lesson updated");
-  } catch (err) {
-    console.error("Update error:", err);
-    res.status(500).send("Error updating lesson");
-  }
-});
-
-// POST new order and update availability
-app.post("/orders", async (req, res) => {
-  const { name, phone, cart } = req.body;
-
-  if (
-    !name ||
-    !/^[A-Za-z\s]{2,}$/.test(name) ||
-    !phone ||
-    !/^\d{7,15}$/.test(phone) ||
-    !Array.isArray(cart) ||
-    cart.length === 0
-  ) {
-    return res.status(400).send("Invalid order data");
-  }
+// Updated Search Route for lessons (or any collection with these fields)
+app.get('/collection/:collectionName/search', async (req, res, next) => {
+  const query = req.query.q;
+  const collection = req.collection;
 
   try {
-    const items = cart.map((item) => ({
-      lessonID: new ObjectId(item._id),
-      name: item.subject,
-      quantity: item.quantity,
-    }));
-
-    for (const item of cart) {
-      const lesson = await lessons.findOne({ _id: new ObjectId(item._id) });
-      if (!lesson || lesson.spaces < item.quantity) {
-        return res.status(400).send(`Not enough spaces for ${item.subject}`);
-      }
-      await lessons.updateOne(
-        { _id: new ObjectId(item._id) },
-        { $inc: { spaces: -item.quantity } }
-      );
+    // If no search query provided, return all documents.
+    if (!query) {
+      console.log("No search query provided; fetching all documents.");
+      const results = await collection.find({}).toArray();
+      return res.json(results);
     }
+    console.log("Search query received:", query);
+    console.log("Collection name:", req.params.collectionName);
 
-    await orders.insertOne({ name, phone, items, createdAt: new Date() });
-    res.status(201).send("✅ Order submitted and lessons updated");
+    // Searching on fields that actually exist in lesson documents.
+    const results = await collection.find({
+      $or: [
+        { subject: { $regex: query, $options: 'i' } },
+        { location: { $regex: query, $options: 'i' } }
+      ]
+    }).toArray();
+
+    res.json(results);
   } catch (err) {
-    console.error("Order error:", err);
-    res.status(500).send("Error saving order");
+    console.error("Search error:", err);
+    res.status(500).json({ error: 'Internal Server Error', details: err.message });
   }
 });
 
-// 404 Fallback
-app.use((req, res) => res.status(404).send("404 - Not Found"));
+// Generic GET: List all documents in a collection.
+app.get('/collection/:collectionName', async (req, res, next) => {
+  try {
+    const results = await req.collection.find({}).toArray();
+    res.json(results);
+  } catch (err) {
+    next(err);
+  }
+});
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running → http://localhost:${PORT}`);
+// Serve static images if needed.
+app.use('/images', express.static(path.join(__dirname, 'images')));
+
+// Generic POST: Insert a document into any collection.
+app.post('/collection/:collectionName', async (req, res, next) => {
+  try {
+    const result = await req.collection.insertOne(req.body);
+    res.status(201).json({
+      msg: 'Document inserted successfully',
+      insertedId: result.insertedId
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Specialized PUT for "Products" collection only.
+app.put('/collection/Products/:_id', async (req, res, next) => {
+  try {
+    const { _id } = req.params;
+    const { Spaces } = req.body;
+    if (!ObjectId.isValid(_id)) {
+      return res.status(400).json({ msg: 'Invalid product ID.' });
+    }
+    if (typeof Spaces !== 'number') {
+      return res.status(400).json({ msg: 'Spaces must be a number.' });
+    }
+    const collection = db.collection('Products');
+    const result = await collection.updateOne(
+      { _id: new ObjectId(_id) },
+      { $set: { Spaces } }
+    );
+    console.log('Matched:', result.matchedCount, '| Modified:', result.modifiedCount);
+    if (result.modifiedCount === 1) {
+      res.json({ msg: 'Update successful', updatedId: _id });
+    } else {
+      res.status(404).json({ msg: 'No matching product found or no update made.' });
+    }
+  } catch (err) {
+    console.error('Update error:', err);
+    next(err);
+  }
+});
+
+// Generic PUT: Update a document in any collection.
+app.put('/collection/:collectionName/:_id', async (req, res, next) => {
+  try {
+    const result = await req.collection.updateOne(
+      { _id: new ObjectId(req.params._id) },
+      { $set: req.body },
+      { upsert: false }
+    );
+    res.json(result.modifiedCount === 1 ? { msg: 'success' } : { msg: 'error' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Generic GET by _id: Retrieve a document by id from any collection.
+app.get('/collection/:collectionName/:_id', async (req, res, next) => {
+  try {
+    const result = await req.collection.findOne({ _id: new ObjectId(req.params._id) });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
 });
