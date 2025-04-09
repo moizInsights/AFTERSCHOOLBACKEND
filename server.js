@@ -1,142 +1,166 @@
-const express = require('express');
-const { MongoClient, ObjectId } = require('mongodb');
+const express = require("express");
+const { MongoClient, ObjectId } = require("mongodb");
+const path = require("path");
+const fs = require("fs");
+
 const app = express();
-const path = require('path');
+const PORT = 3000;
+const MONGO_URI =
+  "mongodb+srv://moizuser1:moiz123@cluster0.xwoau.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
+const DB_NAME = "afterschool";
 
 app.use(express.json());
 
-app.set('port', process.env.PORT || 3000);
-
+// Manual CORS
 app.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS,POST,PUT");
-    res.setHeader("Access-Control-Allow-Headers", "Origin,Accept, X-Requested-With, Content-Type, Access-Control-Request-Method, Access-Control-Request-Headers");
-    next();
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  next();
 });
 
-let db;
+// Logger Middleware
+app.use((req, res, next) => {
+  console.log(
+    `[${new Date().toLocaleString()}] ${req.method} ${req.originalUrl}`
+  );
+  next();
+});
 
-const mongoUri = "mongodb+srv://moizuser1:Fattani123%40@cluster0.xwoau.mongodb.net/";
-
-async function connectDB() {
-    try {
-        const client = await MongoClient.connect(mongoUri, {
-            useNewUrlParser: true,
-            useUnifiedTopology: true
-        });
-
-        db = client.db('afterschool');
-        console.log("✅ Connected to MongoDB successfully");
-
-        app.listen(app.get('port'), () => {
-            console.log(`🚀 Server running at http://localhost:${app.get('port')}`);
-        });
-
-    } catch (err) {
-        console.error("❌ Database connection error:", err);
-        process.exit(1); 
-    }
+// Validator Middleware for PUT
+function validateLessonUpdate(req, res, next) {
+  const { subject, location, price, spaces } = req.body;
+  if (
+    (subject && typeof subject !== "string") ||
+    (location && typeof location !== "string") ||
+    (price && typeof price !== "number") ||
+    (spaces && typeof spaces !== "number")
+  ) {
+    return res.status(400).send("Invalid lesson data format");
+  }
+  next();
 }
 
-connectDB();
+// Serve images
+app.use("/images", (req, res) => {
+  const imgPath = path.join(__dirname, "images", req.url);
+  fs.stat(imgPath, (err, stat) => {
+    if (err || !stat.isFile()) return res.status(404).send("Image not found");
+    res.sendFile(imgPath);
+  });
+});
 
-app.param('collectionName', (req, res, next, collectionName) => {
-    if (!db) {
-        console.error("❌ Database not connected yet!");
-        return res.status(500).json({ error: "Database connection not established yet" });
+// MongoDB Setup
+let db, lessons, orders;
+MongoClient.connect(MONGO_URI, { useUnifiedTopology: true })
+  .then((client) => {
+    db = client.db(DB_NAME);
+    lessons = db.collection("lessons");
+    orders = db.collection("orders");
+    console.log("✅ Connected to MongoDB");
+  })
+  .catch((err) => console.error("❌ MongoDB Error:", err));
+
+// GET all lessons
+app.get("/lessons", async (req, res) => {
+  try {
+    const data = await lessons.find({}).toArray();
+    res.json(data);
+  } catch (err) {
+    res.status(500).send("Error fetching lessons");
+  }
+});
+
+// GET filtered lessons (search)
+app.get("/search", async (req, res) => {
+  const q = req.query.q?.trim().toLowerCase() || "";
+  try {
+    const result = await lessons
+      .find({
+        $or: [
+          { subject: { $regex: q, $options: "i" } },
+          { location: { $regex: q, $options: "i" } },
+        ],
+      })
+      .toArray();
+    res.json(result);
+  } catch {
+    res.status(500).send("Error during search");
+  }
+});
+
+// GET all orders
+app.get("/orders", async (req, res) => {
+  try {
+    const data = await orders.find({}).toArray();
+    res.json(data);
+  } catch (err) {
+    console.error("Error fetching orders:", err);
+    res.status(500).send("Error fetching orders");
+  }
+});
+
+// PUT lesson update
+app.put("/lessons/:id", validateLessonUpdate, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await lessons.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: req.body }
+    );
+    if (result.matchedCount === 0)
+      return res.status(404).send("Lesson not found");
+    res.send("✅ Lesson updated");
+  } catch (err) {
+    console.error("Update error:", err);
+    res.status(500).send("Error updating lesson");
+  }
+});
+
+// POST new order and update availability
+app.post("/orders", async (req, res) => {
+  const { name, phone, cart } = req.body;
+
+  if (
+    !name ||
+    !/^[A-Za-z\s]{2,}$/.test(name) ||
+    !phone ||
+    !/^\d{7,15}$/.test(phone) ||
+    !Array.isArray(cart) ||
+    cart.length === 0
+  ) {
+    return res.status(400).send("Invalid order data");
+  }
+
+  try {
+    const items = cart.map((item) => ({
+      lessonID: new ObjectId(item._id),
+      name: item.subject,
+      quantity: item.quantity,
+    }));
+
+    for (const item of cart) {
+      const lesson = await lessons.findOne({ _id: new ObjectId(item._id) });
+      if (!lesson || lesson.spaces < item.quantity) {
+        return res.status(400).send(`Not enough spaces for ${item.subject}`);
+      }
+      await lessons.updateOne(
+        { _id: new ObjectId(item._id) },
+        { $inc: { spaces: -item.quantity } }
+      );
     }
-    req.collection = db.collection(collectionName);
-    next();
+
+    await orders.insertOne({ name, phone, items, createdAt: new Date() });
+    res.status(201).send("✅ Order submitted and lessons updated");
+  } catch (err) {
+    console.error("Order error:", err);
+    res.status(500).send("Error saving order");
+  }
 });
 
+// 404 Fallback
+app.use((req, res) => res.status(404).send("404 - Not Found"));
 
-
-app.get('/', (req, res) => {
-    res.send('Select a collection, e.g., /collection/messages');
-});
-
-app.get('/collection/:collectionName', async (req, res, next) => {
-    try {
-        const results = await req.collection.find({}).toArray();
-        res.json(results);
-    } catch (err) {
-        next(err);
-    }
-});
-
-app.use('/images', express.static(path.join(__dirname, 'images')));
-
-app.get('/images/tabletennis.jpg', (req, res) => {
-    console.log("Request for image received");
-});
-
-app.post('/collection/:collectionName', async (req, res, next) => {
-    try {
-        const result = await req.collection.insertOne(req.body);
-        res.status(201).json({
-            msg: 'Document inserted successfully',
-            insertedId: result.insertedId
-        });
-    } catch (err) {
-        next(err);
-    }
-});
-
-
-// ✅ Specialized PUT for updating Spaces in Products
-app.put('/collection/Products/:_id', async (req, res, next) => {
-    try {
-        const { _id } = req.params;
-        const { Spaces } = req.body;
-
-        if (!ObjectId.isValid(_id)) {
-            return res.status(400).json({ msg: 'Invalid product ID.' });
-        }
-
-        if (typeof Spaces !== 'number') {
-            return res.status(400).json({ msg: 'Spaces must be a number.' });
-        }
-
-        const collection = db.collection('Products');
-        const result = await collection.updateOne(
-            { _id: new ObjectId(_id) },
-            { $set: { Spaces } }
-        );
-
-        console.log('Matched:', result.matchedCount, '| Modified:', result.modifiedCount);
-
-        if (result.modifiedCount === 1) {
-            res.json({ msg: 'Update successful', updatedId: _id });
-        } else {
-            res.status(404).json({ msg: 'No matching product found or no update made.' });
-        }
-    } catch (err) {
-        console.error('Update error:', err);
-        next(err);
-    }
-});
-
-// ✅ Generic PUT for any collection and any fields
-app.put('/collection/:collectionName/:_id', async (req, res, next) => {
-    try {
-        const result = await req.collection.updateOne(
-            { _id: new ObjectId(req.params._id) },
-            { $set: req.body },
-            { upsert: false }
-        );
-
-        res.json(result.modifiedCount === 1 ? { msg: 'success' } : { msg: 'error' });
-    } catch (err) {
-        next(err);
-    }
-});
-
-app.get('/collection/:collectionName/:_id', async (req, res, next) => {
-    try {
-        const result = await req.collection.findOne({ _id: new ObjectId(req.params._id) });
-        res.json(result);
-    } catch (err) {
-        next(err);
-    }
+app.listen(PORT, () => {
+  console.log(`🚀 Server running → http://localhost:${PORT}`);
 });
